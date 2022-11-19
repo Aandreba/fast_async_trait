@@ -1,14 +1,12 @@
-pub fn add(left: usize, right: usize) -> usize {
-    left + right
-}
+#![feature(unboxed_closures, fn_traits)]
 
-#[cfg(test)]
-mod tests {
-    use super::*;
+extern crate fast_async_trait_proc;
+pub use fast_async_trait_proc::*;
 
-    #[test]
-    fn it_works() {
-        let result = add(2, 2);
-        assert_eq!(result, 4);
-    }
+#[doc(hidden)]
+pub trait FnOnceHelper {
+    type Args;
+    type Output;
+
+    extern "rust-call" fn call_once(self, args: Self::Args) -> Self::Output;
 }

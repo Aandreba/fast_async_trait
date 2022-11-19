@@ -1,8 +1,6 @@
-use std::convert::identity;
-
 use proc_macro2::{TokenStream,};
-use syn::{*, punctuated::Punctuated, spanned::Spanned};
-use quote::{quote, format_ident, ToTokens, quote_spanned};
+use syn::{*, punctuated::Punctuated};
+use quote::{quote, format_ident, ToTokens};
 
 mod def;
 use def::*;
@@ -15,13 +13,13 @@ pub fn async_trait_def (_attrs: proc_macro::TokenStream, items: proc_macro::Toke
     let AsyncTraitDef { attrs, vis, unsafety, auto_token, trait_token, ident, generics, colon_token, supertraits, items, .. } = parse_macro_input!(items as AsyncTraitDef);
     let (impl_generics, _, where_generics) = generics.split_for_impl();
 
-    let tys = items.iter().filter_map(|x| match x {
-        AsyncTraitItem::Type(x) => Some(x),
-        _ => None
-    }).cloned().collect::<Vec<_>>();
+    let (items, extra) = items.into_iter()
+        .map(|x| define_fn(&vis, &ident, x))
+        .unzip::<_, _, Vec<_>, Vec<_>>();
 
-    let (items, extras) = items.into_iter().map(|x| define_fn(&vis, &ident, &generics, &tys, x)).unzip::<_, _, Vec<_>, Vec<_>>();
-    let extras = extras.into_iter().flat_map(identity).collect::<TokenStream>();
+    let extra = extra.into_iter()
+        .filter_map(core::convert::identity)
+        .collect::<TokenStream>();
 
     quote! {
         #(#attrs)*
@@ -29,7 +27,7 @@ pub fn async_trait_def (_attrs: proc_macro::TokenStream, items: proc_macro::Toke
             #(#items)*
         }
 
-        #extras
+        #extra
     }.into()
 }
 
@@ -51,183 +49,80 @@ pub fn async_trait_impl (_attrs: proc_macro::TokenStream, items: proc_macro::Tok
 }
 
 #[inline]
-fn define_fn (vis: &Visibility, trait_ident: &Ident, trait_generics: &Generics, trait_tys: &[TraitItemType], sig: AsyncTraitItem) -> (TokenStream, Option<TokenStream>) {
+fn define_fn (vis: &Visibility, trait_ident: &Ident, sig: AsyncTraitItem) -> (TokenStream, Option<TokenStream>) {
     return match sig {
-        AsyncTraitItem::Method(method) if method.sig.asyncness.is_some() => define_async_fn(vis, trait_ident, trait_generics, trait_tys, method),
+        AsyncTraitItem::Method(method) if method.sig.asyncness.is_some() => define_async_fn(vis, trait_ident, method),
         other => (other.to_token_stream(), None)
     }
 }
 
-fn define_async_fn (vis: &Visibility, trait_ident: &Ident, trait_generics: &Generics, trait_tys: &[TraitItemType], AsyncTraitItemMethod { attrs, sig: Signature { constness, unsafety, abi, fn_token, ident, mut generics, mut inputs, variadic, output, .. }, default, semi_token }: AsyncTraitItemMethod) -> (TokenStream, Option<TokenStream>) {
+fn define_async_fn (vis: &Visibility, trait_ident: &Ident, AsyncTraitItemMethod { attrs, sig: Signature { constness, asyncness, unsafety, abi, fn_token, ident, mut generics, mut inputs, variadic, output, .. }, default, semi_token }: AsyncTraitItemMethod) -> (TokenStream, Option<TokenStream>) {
     let future_name = format_ident!("{}", to_pascal_case(&ident.to_string()));
     let future_output = match output {
         ReturnType::Default => Box::new(parse_quote! { () }),
         ReturnType::Type(_, ty) => ty
     };
-
-    let life = future_generics(inputs.iter_mut(), &mut generics);
+    
+    let (life, main_lt) = future_generics(inputs.iter_mut(), &mut generics);
     let add_token = match life.is_empty() {
         true => None,
         false => Some(<Token![+]>::default())
     };
-
     let (impl_generics, ty_generics, where_generics) = generics.split_for_impl();
-    let (future_default, default_block, default_impl_struct) = match default {
-        Some(x) => {
-            let (default_ident, mut default_generics, default_args, default_struct_impl) = define_async_default(
-                &attrs, &vis, &ident, &future_name,
-                trait_ident, trait_generics, trait_tys, &generics,
-                &inputs, &future_output, x
-            );
 
-            let first = default_generics.type_params_mut().next().unwrap();
-            first.eq_token = Some(Default::default());
-            first.default = Some(parse_quote! { Self });
+    let (future_default, return_type, extra) = match default {
+        Some(block) => {
+            let ty_ident = format_ident!("{trait_ident}{future_name}Default");
 
-            (
-                Some(quote! { = <#default_ident #default_generics as ::core::ops::FnOnce<#default_args>>::Output }),
-                Some(quote! {{ todo!() }}),
-                Some(default_struct_impl)
-            )
+            let ty_size_param = match &main_lt {
+                Some(main_lt) => Some(quote! { ?::core::marker::Sized + #main_lt + }),
+                None => None
+            };
+
+            let mut ty_generics = generics.clone();
+            ty_generics.params.insert(0, parse_quote! { This: #ty_size_param #trait_ident });
+            let (impl_ty_generics, _, _) = ty_generics.split_for_impl();
+
+            let tokens = quote! {{
+                return #asyncness move #block
+            }};
+
+            let opaque = quote! {
+                #[doc(hidden)]
+                #vis type #ty_ident #impl_ty_generics = impl #life #add_token ::core::future::Future; 
+            };
+
+            *ty_generics.params.first_mut().unwrap() = GenericParam::Type(TypeParam {
+                attrs: Default::default(),
+                ident: format_ident!("Self"),
+                colon_token: Default::default(),
+                bounds: Default::default(),
+                eq_token: Default::default(),
+                default: Default::default(),
+            });
+
+            let (_, ty_ty_generics, _) = ty_generics.split_for_impl();
+            (Some(tokens), quote! { #ty_ident #ty_ty_generics }, Some(opaque))
         },
-        None => (None, None, None)
+
+        None => {
+            (None, quote! { Self::#future_name #ty_generics }, None)
+        }
     };
-    
+
+    let associated_type = match &future_default {
+        Some(_) => quote! { type #future_name #impl_generics: #life #add_token ::core::future::Future<Output = <#return_type as ::core::future::Future>::Output> = #return_type #where_generics; },
+        None => quote! { type #future_name #impl_generics: #life #add_token ::core::future::Future<Output = #future_output> #where_generics; }
+    };
+
     let tokens = quote! {
-        type #future_name #impl_generics: #life #add_token ::core::future::Future<Output = #future_output> #future_default #where_generics;
+        #associated_type
 
         #(#attrs)*
-        #constness #unsafety #abi #fn_token #ident #impl_generics (#inputs #variadic) -> Self::#future_name #ty_generics #where_generics #default_block #semi_token
+        #constness #unsafety #abi #fn_token #ident #impl_generics (#inputs #variadic) -> #return_type #where_generics #future_default #semi_token
     };
 
-    return (tokens, default_impl_struct)
-}
-
-fn define_async_default (attrs: &[Attribute], vis: &Visibility, fn_ident: &Ident, fn_pascal_ident: &Ident, trait_ident: &Ident, trait_generics: &Generics, trait_tys: &[TraitItemType], generics: &Generics, args: &Punctuated<FnArg, Token![,]>, output: &Type, block: Block) -> (Ident, Generics, TokenStream, TokenStream) {
-    let struct_name = format_ident!("{trait_ident}{fn_pascal_ident}Default");
-
-    // Sealed
-    let sealed_ident = format_ident!("{fn_ident}_sealed");
-    let extra_ident = format_ident!("{struct_name}Ext");
-
-    // Generics
-    let mut struct_generics = trait_generics.clone();
-    struct_generics.params.extend(generics.params.iter().cloned());
-    
-    let generic_name = format_ident!("This");
-    struct_generics.params.insert(0, parse_quote! { #generic_name: #trait_ident });
-
-    for TypeParam { bounds, .. } in struct_generics.type_params_mut() {
-        if !bounds.iter().any(|x| x == &parse_quote! { Sized }) {
-            bounds.push(parse_quote! { ?Sized })
-        }
-    }
-
-    let (impl_generics, ty_generics, where_generics) = struct_generics.split_for_impl();
-
-    // Arguments
-    let mut unnamed_args = Vec::with_capacity(args.len());
-    let mut arg_names = Vec::with_capacity(args.len());
-
-    for arg in args.iter() {
-        match arg {
-            FnArg::Receiver(Receiver { attrs, reference, mutability, .. }) => {
-                let (and_token, reference) = match reference {
-                    Some((x, y)) => (Some(x), Some(y)),
-                    None => (None, None)
-                };
-
-                unnamed_args.push(quote! { #(#attrs)* #and_token #reference #mutability #generic_name });
-                arg_names.push(quote! { #(#attrs)* this });
-            },
-
-            FnArg::Typed(PatType { attrs, pat, ty, .. }) => {
-                unnamed_args.push(quote! { #(#attrs)* #ty });
-                arg_names.push(quote! { #(#attrs)* #pat });
-            }
-        }
-    }
-
-    // Fields
-    let mut struct_fields = Punctuated::<_, Token![,]>::new();
-    let mut fields_new = Punctuated::<_, Token![,]>::new();
-
-    for lt @ LifetimeDef { attrs, lifetime, .. } in struct_generics.lifetimes() {
-        struct_fields.push(
-            quote_spanned! { lt.span() => #(#attrs)* ::core::marker::PhantomData<&#lifetime ()> }
-        );
-
-        fields_new.push(
-            quote_spanned! { lt.span() => #(#attrs)* ::core::marker::PhantomData }
-        );
-    }
-
-    for ty @ TypeParam { attrs, ident, .. } in struct_generics.type_params() {        
-        struct_fields.push(
-            quote_spanned! { ty.span() => #(#attrs)* ::core::marker::PhantomData<#ident> }
-        );
-
-        fields_new.push(
-            quote_spanned! { ty.span() => #(#attrs)* ::core::marker::PhantomData }
-        );
-    }
-
-    // Associated types
-    let mut struct_tys_defs = Vec::with_capacity(trait_tys.len());
-    let mut struct_tys_impls = Vec::with_capacity(trait_tys.len());
-
-    for ty @ TraitItemType { attrs, type_token, ident, generics, semi_token, .. } in trait_tys {
-        let (impl_generics, _, _) = generics.split_for_impl();
-        struct_tys_defs.push(ty);
-        struct_tys_impls.push(quote! {  #(#attrs)* #type_token #ident #impl_generics = <#generic_name as #trait_ident>::#ident #semi_token });
-    }
-
-    let tokens = quote! {
-        #vis struct #struct_name #impl_generics (#struct_fields);
-
-        #[doc(hidden)]
-        mod #sealed_ident {
-            pub trait Sealed {}
-        }
-
-        #vis trait #extra_ident #impl_generics: #sealed_ident::Sealed #where_generics {
-            #(#struct_tys_defs)*
-            type __FnOnceOutput__: ::core::future::Future<Output = #output>;
-
-            extern "rust-call" fn __call__(self, args: (#(#unnamed_args,)*)) -> Self::__FnOnceOutput__;
-        }
-
-        impl #impl_generics #extra_ident #ty_generics for #struct_name #ty_generics #where_generics {
-            #(#struct_tys_impls)*
-            type __FnOnceOutput__ = impl ::core::future::Future<Output = #output>;
-
-            #(#attrs)*
-            extern "rust-call" fn __call__ (self, (#(#arg_names,)*): (#(#unnamed_args,)*)) -> Self::__FnOnceOutput__ {
-                return async move #block
-            }
-        }
-
-        impl #impl_generics #sealed_ident::Sealed for #struct_name #ty_generics #where_generics {}
-
-        #[doc(hidden)]
-        impl #impl_generics #struct_name #ty_generics #where_generics {
-            #[inline]
-            fn new () -> Self {
-                return Self (#fields_new)
-            }
-        }
-
-        impl #impl_generics ::core::ops::FnOnce<(#(#unnamed_args,)*)> for #struct_name #ty_generics #where_generics {
-            type Output = <Self as #extra_ident #ty_generics>::__FnOnceOutput__;
-
-            #[inline(always)]
-            extern "rust-call" fn call_once (self, args: (#(#unnamed_args,)*)) -> Self::Output {
-                return self.__call__(args)
-            }
-        }
-    };
-
-    return (struct_name, struct_generics, quote! { (#(#unnamed_args,)*) }, tokens)
+    return (tokens, extra)
 }
 
 #[inline]
@@ -245,7 +140,7 @@ fn impl_async_fn (ImplItemMethod { attrs, vis, defaultness, sig: Signature { con
         ReturnType::Type(_, ty) => ty
     };
 
-    let life = future_generics(inputs.iter_mut(), &mut generics);
+    let (life, _) = future_generics(inputs.iter_mut(), &mut generics);
     let add_token = match life.is_empty() {
         true => None,
         false => Some(<Token![+]>::default())
@@ -262,14 +157,16 @@ fn impl_async_fn (ImplItemMethod { attrs, vis, defaultness, sig: Signature { con
     }
 }
 
-fn future_generics<'a> (inputs: impl IntoIterator<Item = &'a mut FnArg>, fn_generics: &mut Generics) -> Punctuated<TokenStream, Token![+]> {
+fn future_generics<'a> (inputs: impl IntoIterator<Item = &'a mut FnArg>, fn_generics: &mut Generics) -> (Punctuated<TokenStream, Token![+]>, Option<Lifetime>) {
     // Reciever generics
+    let mut result = None;
     for input in inputs {
         if let FnArg::Receiver(Receiver { attrs, reference, .. }) = input {            
             match reference {
                 Some((x, lt @ None)) => {
                     let lifetime: Lifetime = parse_quote_spanned! { x.span => '__self__ };
                     *lt = Some(lifetime.clone());
+                    result = Some(lifetime.clone());
 
                     fn_generics.params.insert(0, LifetimeDef {
                         attrs: attrs.clone(),
@@ -282,6 +179,7 @@ fn future_generics<'a> (inputs: impl IntoIterator<Item = &'a mut FnArg>, fn_gene
                 },
 
                 Some((_, Some(lt))) => {
+                    result = Some(lt.clone());
                     fn_generics.make_where_clause().predicates.push(parse_quote! { Self: #lt });
                 },
 
@@ -292,9 +190,11 @@ fn future_generics<'a> (inputs: impl IntoIterator<Item = &'a mut FnArg>, fn_gene
         }
     }
 
-    return fn_generics.lifetimes().map(|LifetimeDef { attrs, lifetime, .. }| 
+    let tokens = fn_generics.lifetimes().map(|LifetimeDef { attrs, lifetime, .. }| 
         quote! { #(#attrs)* #lifetime }
     ).collect();
+
+    return (tokens, result);
 }
 
 fn to_pascal_case (s: &str) -> String {
