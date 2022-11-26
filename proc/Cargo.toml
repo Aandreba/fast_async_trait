@@ -1,5 +1,6 @@
 [package]
 name = "fast_async_trait_proc"
+authors = ["Alex Andreba <aandrebafreelancer@gmail.com>"]
 version = "0.1.0"
 edition = "2021"
 

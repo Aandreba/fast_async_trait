@@ -1,5 +1,7 @@
 [package]
 name = "fast_async_trait"
+description = "Fast async traits"
+authors = ["Alex Andreba <aandrebafreelancer@gmail.com>"]
 version = "0.1.0"
 edition = "2021"
 

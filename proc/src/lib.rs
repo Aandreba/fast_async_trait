@@ -1,5 +1,5 @@
 use proc_macro2::{TokenStream,};
-use syn::{*, punctuated::Punctuated};
+use syn::{*, punctuated::Punctuated, spanned::Spanned};
 use quote::{quote, format_ident, ToTokens};
 
 mod def;
@@ -64,6 +64,10 @@ fn define_async_fn (vis: &Visibility, trait_ident: &Ident, AsyncTraitItemMethod 
     };
     
     let (life, main_lt) = future_generics(inputs.iter_mut(), &mut generics);
+    if generics.lifetimes().count() > 1 {
+        return (syn::Error::new(generics.lifetimes().nth(1).unwrap().span(), "Currently only one lifetime per future is supported").into_compile_error(), None);
+    };
+    
     let add_token = match life.is_empty() {
         true => None,
         false => Some(<Token![+]>::default())
@@ -74,13 +78,18 @@ fn define_async_fn (vis: &Visibility, trait_ident: &Ident, AsyncTraitItemMethod 
         Some(block) => {
             let ty_ident = format_ident!("{trait_ident}{future_name}Default");
 
-            let ty_size_param = match &main_lt {
-                Some(main_lt) => Some(quote! { ?::core::marker::Sized + #main_lt + }),
+            let ty_sized = match &main_lt {
+                Some(_) => Some(quote! { ?::core::marker::Sized + }),
+                None => None
+            };
+
+            let ty_lt = match generics.lifetimes().next() {
+                Some(LifetimeDef { lifetime, .. }) => Some(quote! { #lifetime + }),
                 None => None
             };
 
             let mut ty_generics = generics.clone();
-            ty_generics.params.insert(0, parse_quote! { This: #ty_size_param #trait_ident });
+            ty_generics.params.insert(0, parse_quote! { This: #ty_sized #ty_lt #trait_ident });
             let (impl_ty_generics, _, _) = ty_generics.split_for_impl();
 
             let tokens = quote! {{
@@ -89,8 +98,12 @@ fn define_async_fn (vis: &Visibility, trait_ident: &Ident, AsyncTraitItemMethod 
 
             let opaque = quote! {
                 #[doc(hidden)]
-                #vis type #ty_ident #impl_ty_generics = impl #life #add_token ::core::future::Future; 
+                #vis type #ty_ident #impl_ty_generics = impl #ty_lt ::core::future::Future; 
             };
+
+            /*if generics.lifetimes().count() > 0 {
+                panic!("{opaque}");
+            }*/
 
             *ty_generics.params.first_mut().unwrap() = GenericParam::Type(TypeParam {
                 attrs: Default::default(),
@@ -111,8 +124,8 @@ fn define_async_fn (vis: &Visibility, trait_ident: &Ident, AsyncTraitItemMethod 
     };
 
     let associated_type = match &future_default {
-        Some(_) => quote! { type #future_name #impl_generics: #life #add_token ::core::future::Future<Output = <#return_type as ::core::future::Future>::Output> = #return_type #where_generics; },
-        None => quote! { type #future_name #impl_generics: #life #add_token ::core::future::Future<Output = #future_output> #where_generics; }
+        Some(_) => None,
+        None => Some(quote! { type #future_name #impl_generics: #life #add_token ::core::future::Future<Output = #future_output> #where_generics; })
     };
 
     let tokens = quote! {

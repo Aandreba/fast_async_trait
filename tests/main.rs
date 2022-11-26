@@ -1,14 +1,14 @@
-#![feature(type_alias_impl_trait, associated_type_defaults)]
-
+#![feature(type_alias_impl_trait)]
 use fast_async_trait::*;
 
 #[async_trait_def]
-pub trait AsyncIterator {
+pub trait AsyncTrait {
     type Item;
 
     async fn owned (self) -> Option<Self::Item>;
     async fn by_ref (&self) -> Option<Self::Item>;
     async fn by_mut (&mut self) -> Option<Self::Item>;
+    fn regular_method (&self) -> u8;
     
     #[inline]
     async fn owned_default (self, _n: usize) -> Option<Self::Item> where Self: Sized {
@@ -31,6 +31,56 @@ pub trait AsyncIterator {
         return self.by_mut().await
     }
 }
+
+#[async_trait_impl]
+impl AsyncTrait for (usize, &[u8]) {
+    type Item = u8;
+
+    #[inline]
+    async fn owned (self) -> Option<Self::Item> {
+        return self.1.get(self.0).copied()
+    }
+
+    #[inline]
+    async fn by_ref (&self) -> Option<Self::Item> {
+        return self.1.get(self.0).copied()
+    }
+
+    #[inline]
+    async fn by_mut (&mut self) -> Option<Self::Item> {
+        return self.1.get(self.0).copied()
+    }
+
+    #[inline]
+    fn regular_method (&self) -> u8 {
+        return 32u8;
+    }
+}
+
+/*#[async_trait_impl]
+impl AsyncIterator for (usize, &[u16]) {
+    type Item = u16;
+
+    #[inline]
+    async fn owned (self) -> Option<Self::Item> {
+        return self.1.get(self.0).copied()
+    }
+
+    #[inline]
+    async fn by_ref (&self) -> Option<Self::Item> {
+        return self.1.get(self.0).copied()
+    }
+
+    #[inline]
+    async fn by_mut (&mut self) -> Option<Self::Item> {
+        return self.1.get(self.0).copied()
+    }
+
+    #[inline]
+    async fn by_mut_default (&mut self, n: usize) -> Option<Self::Item> {
+        return self.by_mut().await;
+    }
+}*/
 
 /*type AsyncIteratorAdderDefault<'a, This: 'a + ?Sized + AsyncIterator> = impl 'a + ::core::future::Future;
 
