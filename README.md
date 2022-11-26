@@ -1,21 +1,20 @@
 # Fast Async Trait
-Library to implement stack-allocated async traits, relying only on the `type_alias_impl_trait` nightly feature for it's base implementation.
+Library to implement async traits that aren't reliant on boxed futures, relying instead on the `type_alias_impl_trait` nightly feature for it's base implementation.
 
 ## Limitations
 - Currently, only one lifetime per async function is allowed
-    - 
-    ```rust
-    pub trait AsyncTrait {
-        // allowed
-        async fn test1 (&self, right: u8);
-        // allowed
-        async fn test2 (&self, right: &u8);
-        // allowed
-        async fn test3<'b> (&'b self, right: &'b u8);
-        // compiler error
-        async fn test4<'b> (&self, right: &'b u8);
-    }
-    ```
+```rust
+pub trait AsyncTrait {
+    // allowed
+    async fn test1 (&self, right: u8);
+    // allowed
+    async fn test2 (&self, right: &u8);
+    // allowed
+    async fn test3<'b> (&'b self, right: &'b u8);
+    // compiler error
+    async fn test4<'b> (&self, right: &'b u8);
+}
+```
 - Async functions with `Self: Rc<Self>` and similar aren't currently supported
 
 ## Example
@@ -79,5 +78,3 @@ impl AsyncTrait for (usize, &[u8]) {
 ## Nightly features
 
 The `type_alias_impl_trait` nightly feature is required to be able to add `impl Trait` types (in our case, `impl Future` types) as associated generic types of a trait, which this crate relies on.
-
-The `return_position_impl_trait_in_trait` nightly feature id required to be able to add default async implementations of trait methods.

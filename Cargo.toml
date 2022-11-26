@@ -2,6 +2,7 @@
 name = "fast_async_trait"
 description = "Fast async traits for Rust"
 license = "MIT"
+repository = "https://github.com/Aandreba/fast_async_trait"
 authors = ["Alex Andreba <aandrebafreelancer@gmail.com>"]
 version = "0.1.0"
 edition = "2021"
