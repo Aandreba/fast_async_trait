@@ -96,9 +96,12 @@ fn define_async_fn (vis: &Visibility, trait_ident: &Ident, AsyncTraitItemMethod 
                 return #asyncness move #block
             }};
 
+            let mut opaque_output = future_output.clone();
+            replace_self_ty(&mut opaque_output, &format_ident!("This"));
+
             let opaque = quote! {
                 #[doc(hidden)]
-                #vis type #ty_ident #impl_ty_generics = impl #ty_lt ::core::future::Future; 
+                #vis type #ty_ident #impl_ty_generics = impl #ty_lt ::core::future::Future<Output = #opaque_output>;
             };
 
             /*if generics.lifetimes().count() > 0 {
@@ -226,4 +229,63 @@ fn to_pascal_case (s: &str) -> String {
     }
 
     return result
+}
+
+fn replace_self_ty (ty: &mut Type, replace: &Ident) {
+    match ty {
+        Type::Array(TypeArray { elem, .. }) | 
+        Type::Paren(TypeParen { elem, .. }) |
+        Type::Group(TypeGroup { elem, .. }) |
+        Type::Ptr(TypePtr { elem, .. })     |
+        Type::Slice(TypeSlice { elem, .. }) |
+        Type::Reference(TypeReference { elem, .. }) => replace_self_ty(elem, replace),
+        
+        Type::BareFn(TypeBareFn { inputs, output, .. }) => {
+            inputs.iter_mut().for_each(|x| replace_self_ty(&mut x.ty, replace));
+            if let ReturnType::Type(_, ty) = output { replace_self_ty(ty, replace) };
+        },
+        Type::ImplTrait(TypeImplTrait { bounds, .. }) |
+        Type::TraitObject(TypeTraitObject { bounds, .. }) => replace_self_bounds(bounds.iter_mut(), replace),
+        Type::Tuple(TypeTuple { elems, .. }) => elems.iter_mut()
+            .for_each(|x| replace_self_ty(x, replace)),
+        Type::Path(TypePath { path, .. }) => replace_self(path, replace),
+        Type::Infer(_) | Type::Macro(_) | Type::Never(_) => {},
+        _ => todo!()
+    }
+}
+
+#[inline]
+fn replace_self_bounds<'a> (bounds: impl IntoIterator<Item = &'a mut TypeParamBound>, replace: &Ident) {
+    for bound in bounds {
+        if let TypeParamBound::Trait(bound) = bound {
+            replace_self(&mut bound.path, replace);
+        }
+    }
+}
+
+fn replace_self (Path { segments, .. }: &mut Path, replace: &Ident) {
+    for PathSegment { ident, arguments } in segments.iter_mut() {
+        if ident == "Self" {
+            *ident = replace.clone();
+        }
+
+        match arguments {
+            PathArguments::AngleBracketed(AngleBracketedGenericArguments { args, .. }) => {
+                for arg in args {
+                    match arg {
+                        GenericArgument::Binding(Binding { ty, .. }) | GenericArgument::Type(ty) => replace_self_ty(ty, replace),
+                        GenericArgument::Constraint(Constraint { bounds, .. }) => replace_self_bounds(bounds.iter_mut(), replace),
+                        GenericArgument::Const(_) | GenericArgument::Lifetime(_) => {},
+                    }
+                }
+            },
+
+            PathArguments::Parenthesized(ParenthesizedGenericArguments { inputs, output, .. }) => {
+                inputs.iter_mut().for_each(|x| replace_self_ty(x, replace));
+                if let ReturnType::Type(_, ty) = output { replace_self_ty(ty, replace) }
+            },
+            
+            PathArguments::None => {}
+        }
+    }
 }
